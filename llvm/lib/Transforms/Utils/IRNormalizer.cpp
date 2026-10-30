@@ -407,11 +407,20 @@ void IRNormalizer::foldInstructionName(Instruction *I) const {
   I->setName(Name);
 }
 
+/// Returns true if \p I is an alloca that is not static. An llvm.stackrestore
+/// frees the dynamic allocas made after its llvm.stacksave, so a dynamic alloca
+/// must stay on the same side of both.
+static bool isDynamicAlloca(const Instruction &I) {
+  const auto *AI = dyn_cast<AllocaInst>(&I);
+  return AI && !AI->isStaticAlloca();
+}
+
 /// Reorders the instructions in each basic block. Instructions that access
-/// memory, have side effects or are terminators are visited from first to
-/// last, so they keep their relative order. Each one first pulls in the
-/// operands it needs, so other instructions move down to just before their
-/// first user in the block, or to the end of the block if they have none.
+/// memory, have side effects or are terminators, and dynamic allocas, are
+/// visited from first to last, so they keep their relative order. Each one
+/// first pulls in the operands it needs, so other instructions move down to
+/// just before their first user in the block, or to the end of the block if
+/// they have none.
 ///
 /// \see reorderDefinition()
 void IRNormalizer::reorderInstructions(Function &F) const {
@@ -420,18 +429,21 @@ void IRNormalizer::reorderInstructions(Function &F) const {
                       << BB.getName() << "\n");
     // Find the source nodes of the DAG of instructions in this basic block.
     // Source nodes are instructions that access memory, have side effects, are
-    // terminators, or don't have a parent in the DAG of instructions.
+    // terminators, are dynamic allocas, or don't have a parent in the DAG of
+    // instructions.
     //
     // We must iterate from the first to the last instruction to preserve the
     // order of memory accesses and other side effects. SSA operand dependencies
-    // alone do not prevent a read from moving past a write to the same memory.
+    // alone do not prevent a read from moving past a write to the same memory,
+    // or a dynamic alloca from moving past an llvm.stacksave.
 
     std::stack<Instruction *> TopologicalSort;
     SmallPtrSet<const Instruction *, 32> Visited;
     for (auto &I : BB) {
       // First process memory accessing, side effecting and terminating
-      // instructions.
-      if (!(isOutput(&I) || I.mayReadOrWriteMemory() || I.isTerminator()))
+      // instructions, and dynamic allocas.
+      if (!(isOutput(&I) || I.mayReadOrWriteMemory() || I.isTerminator() ||
+            isDynamicAlloca(I)))
         continue;
       LLVM_DEBUG(dbgs() << "\tReordering from source effecting instruction: ";
                  I.dump());
